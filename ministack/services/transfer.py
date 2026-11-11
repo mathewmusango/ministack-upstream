@@ -742,7 +742,10 @@ def _sftp_s3_bucket(account_id: str, bucket: str):
     avoid an import cycle at module load.
     """
     from ministack.services import s3 as s3_mod
-    return s3_mod._buckets._data.get((account_id, bucket))
+    for (account, _region, name), record in list(s3_mod._buckets._data.items()):
+        if account == account_id and name == bucket:
+            return record
+    return None
 
 
 def _sftp_s3_list_keys(account_id: str, bucket: str, prefix: str):

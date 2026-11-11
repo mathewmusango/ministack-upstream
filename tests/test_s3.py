@@ -4007,10 +4007,10 @@ def test_s3_storage_class_persisted_to_disk(tmp_path, monkeypatch):
     monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
     s3mod._persist_object("qa-bucket", "k", obj)
 
-    s3mod._buckets._data.pop(("000000000000", "qa-bucket"), None)
+    s3mod._buckets._data.pop(("000000000000", "us-east-1", "qa-bucket"), None)
     s3mod._load_persisted_bucket("000000000000", "qa-bucket",
                                  os.path.join(str(tmp_path), "000000000000", "qa-bucket"))
-    restored = s3mod._buckets._data[("000000000000", "qa-bucket")]["objects"]["k"]
+    restored = s3mod._buckets._data[("000000000000", "us-east-1", "qa-bucket")]["objects"]["k"]
     assert restored["storage_class"] == "GLACIER"
 
 
@@ -4039,15 +4039,15 @@ def test_s3_version_id_persisted_to_disk(tmp_path, monkeypatch):
     with open(meta_path) as mf:
         assert json.load(mf)["version_id"] == "test-version-1058"
 
-    s3mod._buckets._data.pop(("000000000000", "ver-bucket"), None)
+    s3mod._buckets._data.pop(("000000000000", "us-east-1", "ver-bucket"), None)
     try:
         s3mod._load_persisted_bucket(
             "000000000000", "ver-bucket",
             os.path.join(str(tmp_path), "000000000000", "ver-bucket"))
-        restored = s3mod._buckets._data[("000000000000", "ver-bucket")]["objects"]["k"]
+        restored = s3mod._buckets._data[("000000000000", "us-east-1", "ver-bucket")]["objects"]["k"]
         assert restored["version_id"] == "test-version-1058"
     finally:
-        s3mod._buckets._data.pop(("000000000000", "ver-bucket"), None)
+        s3mod._buckets._data.pop(("000000000000", "us-east-1", "ver-bucket"), None)
 
 
 def test_s3_version_id_get_object_after_restore(tmp_path, monkeypatch):
@@ -4075,7 +4075,7 @@ def test_s3_version_id_get_object_after_restore(tmp_path, monkeypatch):
     s3mod._persist_object("ver-get-bucket", "k", obj)
 
     # Clear in-memory state to simulate restart
-    s3mod._buckets._data.pop(("000000000000", "ver-get-bucket"), None)
+    s3mod._buckets._data.pop(("000000000000", "us-east-1", "ver-get-bucket"), None)
     s3mod._object_versions._data.pop(("000000000000", ("ver-get-bucket", "k")), None)
 
     try:
@@ -4093,7 +4093,7 @@ def test_s3_version_id_get_object_after_restore(tmp_path, monkeypatch):
         data = s3mod._get_object_data("ver-get-bucket", "k", version_id=version_id)
         assert data == b"version-data"
     finally:
-        s3mod._buckets._data.pop(("000000000000", "ver-get-bucket"), None)
+        s3mod._buckets._data.pop(("000000000000", "us-east-1", "ver-get-bucket"), None)
         s3mod._object_versions._data.pop(("000000000000", ("ver-get-bucket", "k")), None)
 
 
@@ -4117,7 +4117,7 @@ def test_s3_put_object_sidecar_carries_version_id(tmp_path, monkeypatch):
         with open(meta_path) as mf:
             assert json.load(mf)["version_id"] == version_id
     finally:
-        s3mod._buckets._data.pop(("000000000000", "ver-put-bucket"), None)
+        s3mod._buckets._data.pop(("000000000000", "us-east-1", "ver-put-bucket"), None)
         s3mod._bucket_versioning.pop("ver-put-bucket", None)
         s3mod._object_versions.pop(("ver-put-bucket", "k"), None)
 
@@ -4138,7 +4138,7 @@ def test_s3_create_bucket_persists_account_scoped(tmp_path, monkeypatch):
         # ...and there is NO spurious folder at the data-dir root.
         assert not os.path.exists(os.path.join(str(tmp_path), "issue824-create"))
     finally:
-        s3mod._buckets._data.pop(("000000000000", "issue824-create"), None)
+        s3mod._buckets._data.pop(("000000000000", "us-east-1", "issue824-create"), None)
 
 
 def test_s3_put_object_no_spurious_root_folder(tmp_path, monkeypatch):
@@ -4173,7 +4173,7 @@ def test_s3_put_object_no_spurious_root_folder(tmp_path, monkeypatch):
         # ...and the only top-level entry is the account dir — no spurious 'my-bucket'.
         assert sorted(os.listdir(str(tmp_path))) == ["000000000000"]
     finally:
-        s3mod._buckets._data.pop(("000000000000", "my-bucket"), None)
+        s3mod._buckets._data.pop(("000000000000", "us-east-1", "my-bucket"), None)
 
 
 def test_s3_delete_bucket_removes_persisted_dir(tmp_path, monkeypatch):
@@ -4193,7 +4193,7 @@ def test_s3_delete_bucket_removes_persisted_dir(tmp_path, monkeypatch):
         # The on-disk directory is cleaned up, not orphaned.
         assert not os.path.exists(bucket_dir)
     finally:
-        s3mod._buckets._data.pop(("000000000000", "issue824-delete"), None)
+        s3mod._buckets._data.pop(("000000000000", "us-east-1", "issue824-delete"), None)
 
 
 # ---------------------------------------------------------------------------
@@ -4233,7 +4233,7 @@ def s3_persist(tmp_path, monkeypatch):
 
 def _reload_bucket(s3mod, tmp_path, bucket, account="000000000000"):
     """Drop one bucket from memory and reload it from disk (a restart)."""
-    s3mod._buckets._data.pop((account, bucket), None)
+    s3mod._buckets._data.pop((account, "us-east-1", bucket), None)
     for vkey in [k for k in s3mod._object_versions._data
                  if k[0] == account and k[1][0] == bucket]:
         s3mod._object_versions._data.pop(vkey, None)
@@ -4263,7 +4263,7 @@ def test_s3_delete_marker_survives_restart(s3_persist, tmp_path):
 
     _reload_bucket(s3mod, tmp_path, bucket)
 
-    restored = s3mod._buckets._data[("000000000000", bucket)]
+    restored = s3mod._buckets._data[("000000000000", "us-east-1", bucket)]
     assert "gone.txt" not in restored["objects"]
     versions = s3mod._object_versions._data[("000000000000", (bucket, "gone.txt"))]
     assert versions[-1]["is_delete_marker"] is True
@@ -4310,7 +4310,7 @@ def test_s3_lone_delete_marker_sidecar_restores_without_data_file(s3_persist, tm
 
     _reload_bucket(s3mod, tmp_path, bucket)
 
-    assert "k" not in s3mod._buckets._data[("000000000000", bucket)]["objects"]
+    assert "k" not in s3mod._buckets._data[("000000000000", "us-east-1", bucket)]["objects"]
     versions = s3mod._object_versions._data[("000000000000", (bucket, "k"))]
     assert versions[-1]["is_delete_marker"] is True
 
@@ -4332,7 +4332,7 @@ def test_s3_purging_delete_marker_restores_object_after_restart(s3_persist, tmp_
 
     _reload_bucket(s3mod, tmp_path, bucket)
 
-    restored = s3mod._buckets._data[("000000000000", bucket)]
+    restored = s3mod._buckets._data[("000000000000", "us-east-1", bucket)]
     assert restored["objects"]["k"]["version_id"] == version_id
     versions = s3mod._object_versions._data[("000000000000", (bucket, "k"))]
     assert not versions[-1].get("is_delete_marker")
@@ -4354,7 +4354,7 @@ def test_s3_put_after_delete_marker_clears_marker_on_disk(s3_persist, tmp_path):
         assert "is_delete_marker" not in json.load(mf)
 
     _reload_bucket(s3mod, tmp_path, bucket)
-    restored = s3mod._buckets._data[("000000000000", bucket)]
+    restored = s3mod._buckets._data[("000000000000", "us-east-1", bucket)]
     assert s3mod._read_body(bucket, "k", restored["objects"]["k"]) == b"two"
 
 
@@ -4376,7 +4376,7 @@ def test_s3_batch_delete_objects_persists_delete_marker(s3_persist, tmp_path):
 
     _reload_bucket(s3mod, tmp_path, bucket)
 
-    assert "k" not in s3mod._buckets._data[("000000000000", bucket)]["objects"]
+    assert "k" not in s3mod._buckets._data[("000000000000", "us-east-1", bucket)]["objects"]
     versions = s3mod._object_versions._data[("000000000000", (bucket, "k"))]
     assert versions[-1]["is_delete_marker"] is True
 
@@ -4420,7 +4420,7 @@ def test_s3_unversioned_delete_removes_persisted_files(s3_persist, tmp_path):
     assert not os.path.exists(data_path + ".meta.json")
 
     _reload_bucket(s3mod, tmp_path, bucket)
-    assert s3mod._buckets._data.get(("000000000000", bucket), {}).get("objects", {}) == {}
+    assert s3mod._buckets._data.get(("000000000000", "us-east-1", bucket), {}).get("objects", {}) == {}
 
 
 def test_s3_copy_object_propagates_storage_class(s3):
@@ -9099,7 +9099,7 @@ def test_s3_replication_key_region_follows_the_destination_bucket(s3, repl_pair)
 @pytest.fixture
 def replication_state(monkeypatch):
     """A versioned bucket in fresh in-process S3 state, under account 000000000000."""
-    fresh = {"_buckets": AccountScopedDict(), "_bucket_versioning": AccountScopedDict(),
+    fresh = {"_buckets": _s3_mod._BucketStore(), "_bucket_versioning": AccountScopedDict(),
              "_bucket_replication": AccountScopedDict()}
     for attr, store in fresh.items():
         monkeypatch.setattr(_s3_mod, attr, store)
@@ -9386,7 +9386,7 @@ def test_annotations_survive_a_restart(s3_persist, tmp_path):
     v2 = s3mod._put_object(bucket, "k", b"two", {})[1]["x-amz-version-id"]
     s3mod._put_object_annotation(bucket, "k", b"on v2", {}, {"annotationName": ["a"]})
 
-    s3mod._buckets._data.pop(("000000000000", bucket), None)
+    s3mod._buckets._data.pop(("000000000000", "us-east-1", bucket), None)
     for store in (s3mod._object_versions._data, s3mod._object_annotations._data):
         for k in [k for k in store if k[0] == "000000000000" and k[1][0] == bucket]:
             store.pop(k, None)
@@ -9768,9 +9768,11 @@ def test_s3_list_buckets_region_filter(s3):
                 break
         assert names == west
 
-        # No filter lists every region.
-        listed = euw1.list_buckets(Prefix=prefix)["Buckets"]
-        assert [b["Name"] for b in listed] == sorted(east + west)
+        # No filter answers with the buckets homed in the caller's region:
+        # the name namespace is global, the listing is regional (S3 state is
+        # account+region scoped).
+        assert [b["Name"] for b in euw1.list_buckets(Prefix=prefix)["Buckets"]] == west
+        assert [b["Name"] for b in s3.list_buckets(Prefix=prefix)["Buckets"]] == east
     finally:
         for name in east:
             s3.delete_bucket(Bucket=name)
@@ -9898,7 +9900,12 @@ def test_s3_wrong_region_at_home_endpoint_is_authorization_error(euw1_bucket):
 def test_s3_wrong_region_exemptions_and_match(euw1_bucket):
     status, _, body = _raw_signed("GET", f"/{euw1_bucket}?location", "us-east-1")
     assert status == 200 and b"eu-west-1" in body
+    # ListBuckets is exempt from the redirect, and it is regional: the signing
+    # region decides what is enumerated, so another region's bucket is absent
+    # and the bucket's own region lists it.
     status, _, body = _raw_signed("GET", "/", "ap-south-1")
+    assert status == 200 and euw1_bucket.encode() not in body
+    status, _, body = _raw_signed("GET", "/", "eu-west-1")
     assert status == 200 and euw1_bucket.encode() in body
     status, _, body = _raw_signed("GET", f"/{euw1_bucket}/k.txt", "eu-west-1")
     assert (status, body) == (200, b"hello")
@@ -10965,7 +10972,7 @@ def post_form(monkeypatch):
     import ministack.app as app_mod
 
     monkeypatch.setattr(app_mod, "AUTH", False)
-    monkeypatch.setattr(_s3_mod, "_buckets", AccountScopedDict())
+    monkeypatch.setattr(_s3_mod, "_buckets", _s3_mod._BucketStore())
     monkeypatch.setattr(_s3_mod, "S3_PERSIST", False)
     with request_scope("000000000000", "us-east-1"):
         bucket = "post-policy-" + uuid.uuid4().hex[:12]
@@ -12982,9 +12989,9 @@ def test_s3_persisted_keys_a_path_cannot_hold_survive_a_restart(tmp_path, monkey
     # Athena and Glue read ordinary keys at their own path.
     assert open(tmp_path / "000000000000" / "keys-bucket" / "dir" / "child.txt", "rb").read() == b"dir/child.txt"
 
-    s3mod._buckets._data.pop(("000000000000", "keys-bucket"), None)
+    s3mod._buckets._data.pop(("000000000000", "us-east-1", "keys-bucket"), None)
     s3mod._load_persisted_bucket("000000000000", "keys-bucket", str(tmp_path / "000000000000" / "keys-bucket"))
-    restored = s3mod._buckets._data[("000000000000", "keys-bucket")]["objects"]
+    restored = s3mod._buckets._data[("000000000000", "us-east-1", "keys-bucket")]["objects"]
     assert sorted(restored) == sorted(keys)
     assert all(restored[key]["size"] == len(key.encode()) for key in keys)
 
@@ -12994,7 +13001,7 @@ def test_s3_persisted_keys_a_path_cannot_hold_survive_a_restart(tmp_path, monkey
     s3mod._persist_object("keys-bucket", "a/b", {"body": b"moved", "etag": '"e"', "size": 5,
                                                  "last_modified": s3mod.now_iso()})
     assert open(tmp_path / "000000000000" / "keys-bucket" / "a" / "b", "rb").read() == b"moved"
-    s3mod._buckets._data.pop(("000000000000", "keys-bucket"), None)
+    s3mod._buckets._data.pop(("000000000000", "us-east-1", "keys-bucket"), None)
 
 
 def test_object_lock_retention_and_legal_hold_survive_a_restart(monkeypatch, tmp_path):

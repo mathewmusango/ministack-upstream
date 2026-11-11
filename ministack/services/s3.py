@@ -94,7 +94,96 @@ XML_DECL = b'<?xml version="1.0" encoding="UTF-8"?>'
 # ---------------------------------------------------------------------------
 # In-memory storage
 # ---------------------------------------------------------------------------
-_buckets = AccountScopedDict()
+
+
+class _BucketStore(AccountRegionScopedDict):
+    """Buckets: one home region per name, in a partition-wide namespace.
+
+    "General purpose buckets exist in a global namespace, which means that each
+    bucket name must be unique across all AWS accounts in all the AWS Regions
+    within a partition" — so a name, not the request scope, identifies the
+    record. Lookups therefore resolve to the region that owns the name (which is
+    what lets the existing call sites, the wrong-endpoint ``301`` and the
+    ``BucketAlreadyExists`` check keep working), while *enumeration* —
+    iteration, ``len``, ``keys``/``items`` — stays scoped to the request region,
+    so ``ListBuckets`` answers with this region's buckets and no others.
+
+    A write places the record in the region the record names: ``CreateBucket``
+    with a ``LocationConstraint`` other than the signing region creates the
+    bucket where the constraint says, and every later mutation of that record
+    keeps addressing it there.
+    """
+
+    def _home_key(self, key):
+        # The caller's own record, wherever it lives: names are unique in the
+        # partition, so the last element matches whether the key carries a
+        # region or is a legacy (account, name) pair. Another account's bucket
+        # is deliberately *not* visible here — foreign access resolves through
+        # `_bucket_owner_account` and the bucket scope it pins.
+        account = get_account_id()
+        for scoped in list(self._data):
+            if scoped[-1] == key and scoped[0] == account:
+                return scoped
+        return None
+
+    def __setitem__(self, key, value):
+        region = value.get("region") if isinstance(value, dict) else None
+        self._data[(get_account_id(), region or get_region(), key)] = value
+
+    def __getitem__(self, key):
+        scoped = self._scoped(key)
+        if scoped in self._data:
+            return self._data[scoped]
+        home = self._home_key(key)
+        if home is None:
+            raise KeyError(key)
+        return self._data[home]
+
+    def __delitem__(self, key):
+        scoped = self._scoped(key)
+        if scoped in self._data:
+            del self._data[scoped]
+            return
+        home = self._home_key(key)
+        if home is None:
+            raise KeyError(key)
+        del self._data[home]
+
+    def __contains__(self, key):
+        return self._scoped(key) in self._data or self._home_key(key) is not None
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def for_account(self, account_id: str, key: str):
+        """The record *account_id* holds under *key*, whatever region owns it."""
+        for scoped in list(self._data):
+            if scoped[-1] == key and scoped[0] == account_id:
+                return self._data[scoped]
+        return None
+
+    def pop(self, key, *args):
+        try:
+            value = self[key]
+        except KeyError:
+            if args:
+                return args[0]
+            raise
+        del self[key]
+        return value
+
+    def setdefault(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            self[key] = default
+            return default
+
+
+_buckets = _BucketStore()
 
 _bucket_policies = AccountScopedDict()
 _bucket_notifications = AccountScopedDict()
@@ -451,8 +540,8 @@ _PERSISTED_BUCKET_DICTS = {
 
 def get_state():
     # Persist bucket metadata without object bodies.
-    # Use _data directly to capture ALL accounts, not just the current one.
-    buckets_meta = AccountScopedDict()
+    # Use _data directly to capture ALL accounts and regions, not just the current one.
+    buckets_meta = AccountRegionScopedDict()
     for scoped_key, bkt in _buckets._data.items():
         meta = {k: v for k, v in bkt.items() if k != "objects"}
         buckets_meta._data[scoped_key] = meta
@@ -466,16 +555,44 @@ def load_persisted_state(data):
     return _restore_state(data)
 
 
+def _restore_bucket(account_id: str, region: str, name: str, meta: dict, default_region: str) -> None:
+    """Restore one bucket record under ``(account, region, name)``.
+
+    The object importer runs before state loads and knows only the on-disk
+    ``<account>/<bucket>`` layout, so it parks a placeholder in the default
+    region. When the metadata says the bucket lives elsewhere, move the objects
+    it already imported onto the real region instead of leaving a second,
+    object-less copy behind.
+    """
+    target = (account_id, region, name)
+    if target != (account_id, default_region, name):
+        placeholder = _buckets._data.pop((account_id, default_region, name), None)
+        if placeholder is not None and not placeholder.get("region"):
+            record = _buckets._data.get(target)
+            if record is None:
+                record = {"objects": {}}
+                _buckets._data[target] = record
+            record.setdefault("objects", {}).update(placeholder.get("objects") or {})
+    _buckets._data.setdefault(target, {"objects": {}}).update(meta)
+
+
 def _restore_state(data):
     if not data:
         return
     bm = data.get("buckets_meta", {})
+    default_region = os.environ.get("MINISTACK_REGION", "us-east-1")
     # Object persistence may already have created placeholder buckets during
     # import. Restore metadata onto those records without replacing objects.
-    if isinstance(bm, AccountScopedDict):
-        # Restore all accounts' buckets directly via _data
-        for scoped_key, meta in bm._data.items():
-            _buckets._data.setdefault(scoped_key, {"objects": {}}).update(meta)
+    if isinstance(bm, AccountRegionScopedDict):
+        # Restore all accounts' and regions' buckets directly via _data
+        for (account_id, region, name), meta in bm._data.items():
+            _restore_bucket(account_id, region, name, meta, default_region)
+    elif isinstance(bm, AccountScopedDict):
+        # v2 snapshots: keyed by (account, name), with the bucket's region on
+        # the record itself. Re-key by that region so pre-upgrade buckets keep
+        # answering from the endpoint that owns them.
+        for (account_id, name), meta in bm._data.items():
+            _restore_bucket(account_id, meta.get("region") or default_region, name, meta, default_region)
     else:
         # Legacy plain-dict format (pre-multi-tenancy)
         for name, meta in bm.items():
@@ -755,15 +872,14 @@ def _reschedule_restores() -> None:
     except Exception:
         return
     now = time.time()
-    for (account_id, bucket_name), bucket in entries:
+    for (account_id, region, bucket_name), bucket in entries:
         for key, obj in list((bucket.get("objects") or {}).items()):
             restore = obj.get("restore")
             if not restore:
                 continue
             # The workers copy their context at schedule time, so pin the
-            # owning account around the calls (#876 shape).
-            set_request_account_id(account_id)
-            try:
+            # owning account and region around the calls (#876 shape).
+            with request_scope(account_id, region):
                 if now >= restore["expires_at"]:
                     # Lapsed while down: revert to archived and fire :Delete.
                     _sync_restore(bucket_name, key, obj)
@@ -771,8 +887,6 @@ def _reschedule_restores() -> None:
                 if not restore.get("completed_fired"):
                     _schedule_restore_completed(bucket_name, key, restore["requested_at"])
                 _schedule_restore_expiry(bucket_name, key, restore["expires_at"])
-            finally:
-                set_request_account_id("")
 
 
 # ---------------------------------------------------------------------------
@@ -1156,7 +1270,7 @@ def _public_access_blocked(owner_account: str, bucket_name: str, setting: str) -
     if access_point and access_point["Bucket"] == bucket_name and setting != "BlockPublicPolicy" and \
             access_point["PublicAccessBlockConfiguration"].get(setting):
         return True
-    record = _buckets.get_scoped(owner_account, None, bucket_name) or {}
+    record = _buckets.for_account(owner_account, bucket_name) or {}
     stored = record.get("_public_access_block")
     if not stored:
         return False
@@ -1186,17 +1300,16 @@ def _bucket_owner_account(name: str) -> str | None:
     within a partition" — so a name identifies one bucket, whoever asks. The
     store stays account-scoped; this is the index over it.
     """
-    # A copy of the keys: internal reads call this from worker threads.
-    for account_id, bucket_name in list(_buckets._data):
-        if bucket_name == name:
-            return account_id
-    return None
+    home = _bucket_home(name)
+    return home[0] if home else None
 
 
 def _bucket_owner_for_caller(name: str) -> str | None:
     """The account whose bucket *name* the current caller reads: its own, else the owner, or None."""
     caller = get_account_id()
-    return caller if _buckets.contains_scoped(caller, None, name) else _bucket_owner_account(name)
+    if _buckets.contains_scoped(caller, get_region(), name):
+        return caller
+    return _bucket_owner_account(name)
 
 
 # A Multi-Region Access Point or an object through it: arn:aws:s3::<account>:accesspoint/<alias>[/object/<key>].
@@ -1214,7 +1327,8 @@ def bucket_policy_for_arn(resource_arn: str) -> tuple[str, str] | None:
         return None
     bucket = resource_arn[len("arn:aws:s3:::"):].split("/", 1)[0]
     owner = get_account_id()
-    if not _buckets.contains_scoped(owner, None, bucket):
+    home = _bucket_home(bucket)
+    if home is None or home[0] != owner:
         return None
     return _bucket_policies.get_scoped(owner, None, bucket) or "", owner
 
@@ -1225,7 +1339,8 @@ def bucket_policy_for_owner(resource_arn: str, owner: str) -> tuple[str, str] | 
     if not resource_arn.startswith("arn:aws:s3:::"):
         return None
     bucket = resource_arn[len("arn:aws:s3:::"):].split("/", 1)[0]
-    if not _buckets.contains_scoped(owner, None, bucket):
+    home = _bucket_home(bucket)
+    if home is None or home[0] != owner:
         return None
     return _bucket_policies.get_scoped(owner, None, bucket) or "", owner
 
@@ -1304,7 +1419,7 @@ def _foreign_bucket_allows(owner_account: str, bucket_name: str, key: str,
     wants = _bucket_acl_wants(method, bucket_name, key, query_params)
     groups = [_ACL_GROUP_ALL_USERS] if not caller else [
         _ACL_GROUP_ALL_USERS, _ACL_GROUP_AUTHENTICATED]
-    bucket = _buckets.get_scoped(owner_account, None, bucket_name)
+    bucket = _buckets.for_account(owner_account, bucket_name)
     # BucketOwnerEnforced disables the bucket ACL as well.
     bucket_acl = None if bucket is None or _bucket_owner_enforced(bucket) else _bucket_acl.get_scoped(
         owner_account, None, bucket_name)
@@ -1372,7 +1487,7 @@ def _foreign_object_acl(owner_account: str, bucket_name: str, key: str, method: 
     """The stored ACL of the object version a read addresses, and the permissions that grant the read."""
     if not key or method not in ("GET", "HEAD") or any(q in query_params for q in _ACL_UNGRANTED_OBJECT_READS):
         return None, ()
-    bucket = _buckets.get_scoped(owner_account, None, bucket_name)
+    bucket = _buckets.for_account(owner_account, bucket_name)
     if bucket is None or _bucket_owner_enforced(bucket):
         # BucketOwnerEnforced disables ACLs: only policies grant access.
         return None, ()
@@ -1431,12 +1546,39 @@ def _signed_region(headers: dict, query_params: dict) -> str | None:
     return extract_signed_region(headers, query_params)
 
 
+def _bucket_home(name: str) -> tuple[str, str] | None:
+    """``(account_id, region)`` that holds *name* anywhere in the partition.
+
+    Buckets live in a global namespace, so the name — not the request scope —
+    identifies the record. This is the index used to answer a request that
+    reached the wrong regional endpoint, and to keep ``CreateBucket``'s
+    ``BucketAlreadyExists`` global once the store is region-scoped.
+    """
+    # A copy of the keys: internal reads call this from worker threads.
+    for scoped in list(_buckets._data):
+        if scoped[-1] != name:
+            continue
+        return (scoped[0], scoped[1] if len(scoped) > 2 else None)
+    return None
+
+
 def bucket_region(name: str) -> str | None:
-    """Home region of a bucket in the current scope, or None if it doesn't exist."""
+    """Home region of a bucket, or None if no region holds that name.
+
+    The current scope wins; a name held by another region still answers with
+    its own region, so a request signed for the wrong endpoint gets the
+    ``301 PermanentRedirect`` AWS returns rather than ``NoSuchBucket``.
+    """
     record = _buckets.get(name)
-    if record is None:
+    if record is not None:
+        return record.get("region") or os.environ.get("MINISTACK_REGION", "us-east-1")
+    home = _bucket_home(name)
+    if home is None:
         return None
-    return record.get("region") or os.environ.get("MINISTACK_REGION", "us-east-1")
+    record = _buckets.get_scoped(home[0], home[1], name)
+    if record is None:
+        return home[1]
+    return record.get("region") or home[1]
 
 
 def _bucket_region_for_caller(name: str) -> str | None:
@@ -1669,7 +1811,7 @@ def format_head_response(path: str, headers: dict, response: tuple) -> tuple:
         response_headers["x-amz-id-2"] = base64.b64encode(os.urandom(57)).decode()
     owner = _bucket_owner_account(bucket) if _validate_bucket_name(bucket) else None
     if not key and owner is not None:
-        record = _buckets.get_scoped(owner, None, bucket)
+        record = _buckets.for_account(owner, bucket)
         response_headers["x-amz-bucket-region"] = record.get("region") or os.environ.get("MINISTACK_REGION", "us-east-1")
         if status == 200:
             response_headers["x-amz-bucket-arn"] = f"arn:aws:s3:::{bucket}"
@@ -1769,7 +1911,7 @@ def validate_object_request(method: str, path: str, headers: dict, query_params:
     if isinstance(signature, tuple):
         return None  # Keep the shared malformed-signature handling.
     owner = _bucket_owner_account(bucket)
-    record = _buckets.get_scoped(owner, None, bucket) if owner is not None else None
+    record = _buckets.for_account(owner, bucket) if owner is not None else None
     host = headers.get("host", "").lower()
     regional = re.search(r"(?:^|\.)s3[.-]([a-z]{2}(?:-[a-z]+)+-\d+)\.(.+)$", host)
     if regional:
@@ -6239,7 +6381,7 @@ def _replication_destination(bucket_name: str, key: str, rule: dict, role: str):
     dest_name = dest_ref.split(":::")[-1] if ":::" in dest_ref else dest_ref
     # The name identifies the bucket; Destination.Account only names the owner for AccessControlTranslation.
     dest_account = _bucket_owner_account(dest_name)
-    dest_bucket = _buckets.get_scoped(dest_account, None, dest_name) if dest_account else None
+    dest_bucket = _buckets.for_account(dest_account, dest_name) if dest_account else None
     if (dest_bucket is None or dest_name == bucket_name
             or _bucket_versioning.get_scoped(dest_account, None, dest_name) != "Enabled"):
         return None
@@ -8160,7 +8302,7 @@ def _replication_destination_region(dest_bucket: str) -> str | None:
     owner = _bucket_owner_account(name)
     if owner is None:
         return None
-    record = _buckets.get_scoped(owner, None, name) or {}
+    record = _buckets.for_account(owner, name) or {}
     return record.get("region") or os.environ.get("MINISTACK_REGION", "us-east-1")
 
 
@@ -9739,7 +9881,7 @@ def _load_persisted_bucket(account_id, bucket_name, bucket_path):
     has_files = any(not f.endswith(".meta.json") for _, _, files in os.walk(bucket_path) for f in files)
     if not has_files and not os.listdir(bucket_path):
         return
-    scoped_key = (account_id, bucket_name)
+    scoped_key = (account_id, os.environ.get("MINISTACK_REGION", "us-east-1"), bucket_name)
     if scoped_key not in _buckets._data:
         _buckets._data[scoped_key] = {
             "created": now_iso(),
