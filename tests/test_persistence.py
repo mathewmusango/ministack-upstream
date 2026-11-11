@@ -1935,7 +1935,7 @@ def test_s3_central_restore_preserves_metadata_and_objects(monkeypatch, tmp_path
     from ministack.core.responses import AccountScopedDict, request_scope
     from ministack.services import s3
 
-    monkeypatch.setattr(s3, "_buckets", AccountScopedDict())
+    monkeypatch.setattr(s3, "_buckets", s3._BucketStore())
     monkeypatch.setattr(s3, "DATA_DIR", str(tmp_path / "objects"))
     monkeypatch.setattr(s3, "S3_PERSIST", True)
     monkeypatch.setattr(app, "_state_map", {"s3": "s3"})
