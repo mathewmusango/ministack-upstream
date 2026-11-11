@@ -594,9 +594,12 @@ def _restore_state(data):
         for (account_id, name), meta in bm._data.items():
             _restore_bucket(account_id, meta.get("region") or default_region, name, meta, default_region)
     else:
-        # Legacy plain-dict format (pre-multi-tenancy)
+        # Legacy plain-dict format (pre-multi-tenancy): the account is whoever
+        # is asking, the region is the one the record carries.
         for name, meta in bm.items():
-            _buckets.setdefault(name, {"objects": {}}).update(meta)
+            _restore_bucket(
+                get_account_id(), meta.get("region") or default_region, name, meta, default_region
+            )
     for key, d in _PERSISTED_BUCKET_DICTS.items():
         d.update(data.get(key, {}))
 
@@ -9869,7 +9872,18 @@ def _load_persisted_bucket(account_id, bucket_name, bucket_path):
     has_files = any(not f.endswith(".meta.json") for _, _, files in os.walk(bucket_path) for f in files)
     if not has_files and not os.listdir(bucket_path):
         return
-    scoped_key = (account_id, os.environ.get("MINISTACK_REGION", "us-east-1"), bucket_name)
+    # The on-disk layout is <account>/<bucket> — no region. If metadata already
+    # placed this bucket (a restore that ran before the object import), reuse
+    # that record instead of parking a second, object-less one in the default
+    # region.
+    scoped_key = next(
+        (
+            key
+            for key in _buckets._data
+            if key[0] == account_id and key[-1] == bucket_name
+        ),
+        (account_id, os.environ.get("MINISTACK_REGION", "us-east-1"), bucket_name),
+    )
     if scoped_key not in _buckets._data:
         _buckets._data[scoped_key] = {
             "created": now_iso(),
