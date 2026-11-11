@@ -66,9 +66,18 @@ def test_s3_list_buckets_returns_arn_and_region(s3):
 
 
 def test_s3_create_bucket_already_exists(s3):
-    # Real AWS: creating a bucket you already own is idempotent — returns 200
+    # MiniStack refuses a duplicate name outright (AWS answers 200 for a bucket
+    # you own in us-east-1): one code and one message, whichever owner asks.
     s3.create_bucket(Bucket="intg-s3-dup")
-    s3.create_bucket(Bucket="intg-s3-dup")  # must not raise
+    with pytest.raises(ClientError) as exc:
+        s3.create_bucket(Bucket="intg-s3-dup")
+    err = exc.value.response["Error"]
+    assert err["Code"] == "BucketAlreadyExists"
+    assert err["Message"] == (
+        "The requested bucket name is not available. The bucket namespace is shared by all users of "
+        "the system. Please select a different name and try again.")
+    assert err["BucketName"] == "intg-s3-dup"
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
 
 def test_s3_delete_bucket(s3):
     s3.create_bucket(Bucket="intg-s3-delbkt")
@@ -886,7 +895,7 @@ def test_s3_location_constraint_required_outside_us_east_1(s3):
         resp = _create_bucket_error(euw1, Bucket=bkt)
         assert resp["Error"]["Code"] == "IllegalLocationConstraintException"
         resp = _create_bucket_error(euw1, Bucket=bkt, CreateBucketConfiguration={"LocationConstraint": "eu-west-1"})
-        assert resp["Error"]["Code"] == "BucketAlreadyOwnedByYou"
+        assert resp["Error"]["Code"] == "BucketAlreadyExists"
         assert resp["Error"]["BucketName"] == bkt
     finally:
         euw1.delete_bucket(Bucket=bkt)
@@ -1257,10 +1266,13 @@ class TestS3VhostGetPutObject:
         self.s3_path = make_client("s3", additional_config_kwargs=dict(s3={"addressing_style": "path"}))
         self.s3_virtual = make_client("s3", additional_config_kwargs=dict(s3={"addressing_style": "virtual"}))
 
-        s3.create_bucket(Bucket=self.BKT)
+        for name in (self.BKT, self.BKT_DOTTED):
+            try:
+                s3.create_bucket(Bucket=name)
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] != "BucketAlreadyExists":
+                    raise
         s3.put_object(Bucket=self.BKT, Key="vhost-test.txt", Body=b"vhost content")
-
-        s3.create_bucket(Bucket=self.BKT_DOTTED)
         s3.put_object(Bucket=self.BKT_DOTTED, Key="vhost-test.txt", Body=b"vhost content")
 
     def test_path_style_get(self):
@@ -5243,7 +5255,7 @@ def test_s3_presigned_post_metadata_fields(s3):
 
 def test_s3_eventbridge_notification_on_delete(s3, sqs, eb):
     """S3 delete_object should send EventBridge event when EventBridgeConfiguration is enabled."""
-    bucket = "s3-eb-del-bkt"
+    bucket = "s3-eb-del-note-bkt"
     s3.create_bucket(Bucket=bucket)
     queue_url = sqs.create_queue(QueueName="s3-eb-del-target-q")["QueueUrl"]
     queue_arn = sqs.get_queue_attributes(
@@ -9561,16 +9573,17 @@ def test_s3_create_owned_bucket_again(s3):
     s3.create_bucket(Bucket=east, ObjectOwnership="ObjectWriter", ACL="public-read")
     s3.create_bucket(Bucket=west, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
     try:
-        s3.create_bucket(Bucket=east)
+        # Same answer in us-east-1 and elsewhere: the duplicate is refused, and
+        # the existing bucket's ACLs are left alone.
+        for bucket, kwargs in ((east, {}), (west, {"CreateBucketConfiguration": {"LocationConstraint": "us-west-2"}})):
+            with pytest.raises(ClientError) as exc:
+                s3.create_bucket(Bucket=bucket, **kwargs)
+            assert exc.value.response["Error"]["Code"] == "BucketAlreadyExists"
+            assert exc.value.response["Error"]["BucketName"] == bucket
+            assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
+        # The refused create must not reset the ACL the bucket was made with.
         grants = s3.get_bucket_acl(Bucket=east)["Grants"]
-        assert [g["Permission"] for g in grants] == ["FULL_CONTROL"]
-        with pytest.raises(ClientError) as exc:
-            s3.create_bucket(Bucket=west, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
-        assert exc.value.response["Error"]["Code"] == "BucketAlreadyOwnedByYou"
-        assert exc.value.response["Error"]["Message"] == (
-            "Your previous request to create the named bucket succeeded and you already own it.")
-        assert exc.value.response["Error"]["BucketName"] == west
-        assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
+        assert [g["Permission"] for g in grants] == ["FULL_CONTROL", "READ"]
     finally:
         s3.delete_bucket(Bucket=east)
         s3.delete_bucket(Bucket=west)

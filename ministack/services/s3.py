@@ -3342,23 +3342,13 @@ def _create_bucket(name: str, body: bytes, headers: dict = None, endpoint_region
         err = _location_constraint_error(name, _location_constraint(body), endpoint_region)
         if err is not None:
             return err
-    if name in _buckets:
-        # Outside us-east-1 AWS returns BucketAlreadyOwnedByYou; in us-east-1,
-        # "returns 200 OK and resets the bucket access control lists (ACLs)".
-        if _buckets[name].get("region", "us-east-1") != "us-east-1":
-            return _error("BucketAlreadyOwnedByYou",
-                          "Your previous request to create the named bucket succeeded and you already own it.",
-                          409, f"/{name}", extra={"BucketName": name})
-        _bucket_acl.pop(name, None)
-        if canned_acl:
-            _bucket_acl[name] = _canned_acl_policy_xml(canned_acl, _canonical_owner_id())
-        elif grant_acl:
-            _bucket_acl[name] = grant_acl
-        return 200, {"Location": f"/{name}"}, b""
     if _bucket_owner_account(name) is not None:
-        # "After creating a general purpose bucket in the shared global
-        # namespace, that bucket name is unavailable for anyone else to create
-        # within a partition."
+        # One answer for every duplicate, whichever account owns the name and
+        # whichever region it lives in. AWS is laxer — a re-create of a bucket
+        # you already own answers 200 in us-east-1 (resetting its ACLs) and
+        # BucketAlreadyOwnedByYou elsewhere — but that lets a client silently
+        # "recreate" a bucket it already has, and nothing downstream can tell
+        # that apart from a real create.
         return _error(
             "BucketAlreadyExists",
             "The requested bucket name is not available. The bucket namespace "
