@@ -2094,9 +2094,22 @@ def test_lambda_nodejs_update_code(lam):
     payload = json.loads(resp["Payload"].read())
     assert payload["body"] == "v2"
 
+def _code_bucket(s3, bucket="lambda-code-bucket"):
+    """The S3 bucket the payload lives in: several tests share one name.
+
+    CreateBucket refuses a duplicate, so a bucket another test already made is
+    fine — anything else is a real failure.
+    """
+    try:
+        s3.create_bucket(Bucket=bucket)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "BucketAlreadyExists":
+            raise
+    return bucket
+
+
 def test_lambda_create_from_s3(lam, s3):
-    bucket = "lambda-code-bucket"
-    s3.create_bucket(Bucket=bucket)
+    bucket = _code_bucket(s3)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("index.py", "def handler(event, context): return {'s3': True}")
@@ -2119,8 +2132,7 @@ _UNZIP_MSG = "Could not unzip uploaded file. Please check your file, then try to
 
 def _refused_package_errors(lam, s3, package, tag):
     """The error each operation answers to ``package``; UpdateFunctionCode reads it from S3."""
-    bucket = "lambda-code-bucket"
-    s3.create_bucket(Bucket=bucket)
+    bucket = _code_bucket(s3)
     s3.put_object(Bucket=bucket, Key=f"{tag}-ok.zip", Body=_make_zip("def handler(event, context): return 1"))
     s3.put_object(Bucket=bucket, Key=f"{tag}-bad.zip", Body=package)
     created = lam.create_function(
