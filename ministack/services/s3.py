@@ -3351,9 +3351,7 @@ def _create_bucket(name: str, body: bytes, headers: dict = None, endpoint_region
         # that apart from a real create.
         return _error(
             "BucketAlreadyExists",
-            "The requested bucket name is not available. The bucket namespace "
-            "is shared by all users of the system. Please select a different "
-            "name and try again.",
+            f"Bucket {name} already exists",
             409,
             f"/{name}",
             extra={"BucketName": name},

@@ -73,9 +73,7 @@ def test_s3_create_bucket_already_exists(s3):
         s3.create_bucket(Bucket="intg-s3-dup")
     err = exc.value.response["Error"]
     assert err["Code"] == "BucketAlreadyExists"
-    assert err["Message"] == (
-        "The requested bucket name is not available. The bucket namespace is shared by all users of "
-        "the system. Please select a different name and try again.")
+    assert err["Message"] == "Bucket intg-s3-dup already exists"
     assert err["BucketName"] == "intg-s3-dup"
     assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
 
