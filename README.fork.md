@@ -1,5 +1,7 @@
 # README.fork.md — what this fork adds
 
+[![Semgrep](https://github.com/mathewmusango/ministack-upstream/actions/workflows/semgrep.yml/badge.svg)](https://github.com/mathewmusango/ministack-upstream/actions/workflows/semgrep.yml)
+
 This repository is a fork of
 [`ministackorg/ministack`](https://github.com/ministackorg/ministack) kept at
 `v1.5.40` plus one change that is not upstream yet: **S3 bucket state is
@@ -163,8 +165,9 @@ Two rules clients see, because they are S3's own:
 
 ## Building and tagging
 
-The fork's only other commit is `.github/workflows/fork-image.yml`, which builds
-`Dockerfile.full` and pushes
+The fork's own commits are `.github/workflows/fork-image.yml` (the image build)
+and `.github/workflows/semgrep.yml` (the semgrep.dev scan, added from the Semgrep
+App); the image workflow builds `Dockerfile.full` and pushes
 `ghcr.io/mathewmusango/ministack-upstream` on workflow dispatch and on `v*` tags
 — never on a `main` push, because `main` carries no patch. Cutting a release:
 merge `feat/s3-region-scoped-state` into `main`, tag `main`
