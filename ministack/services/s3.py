@@ -3345,13 +3345,30 @@ def _create_bucket(name: str, body: bytes, headers: dict = None, endpoint_region
         err = _location_constraint_error(name, _location_constraint(body), endpoint_region)
         if err is not None:
             return err
-    if _bucket_owner_account(name) is not None:
-        # One answer for every duplicate, whichever account owns the name and
-        # whichever region it lives in. AWS is laxer — a re-create of a bucket
-        # you already own answers 200 in us-east-1 (resetting its ACLs) and
-        # BucketAlreadyOwnedByYou elsewhere — but that lets a client silently
-        # "recreate" a bucket it already has, and nothing downstream can tell
-        # that apart from a real create.
+    owner = _bucket_owner_account(name)
+    if owner is not None:
+        caller = get_account_id()
+        home = _bucket_home(name) or (None, None)
+        target = endpoint_region or get_region()
+        home_region = home[1] or os.environ.get("MINISTACK_REGION", "us-east-1")
+        if owner == caller and home_region == target:
+            # AWS's own re-create rule when the owner asks in the bucket's own
+            # region: us-east-1 answers 200 and resets the ACLs to private (its
+            # legacy behaviour); every other region answers
+            # BucketAlreadyOwnedByYou. Anything else is a name held by another
+            # account, or by this one in another region, and stays
+            # BucketAlreadyExists wherever it is asked for.
+            if target == "us-east-1":
+                _bucket_acl.pop(name, None)
+                logger.info("S3 bucket re-created: %s (region=%s)", name, target)
+                return 200, {"Location": f"/{name}"}, b""
+            return _error(
+                "BucketAlreadyOwnedByYou",
+                "Your previous request to create the named bucket succeeded and you already own it.",
+                409,
+                f"/{name}",
+                extra={"BucketName": name},
+            )
         return _error(
             "BucketAlreadyExists",
             f"Bucket {name} already exists",
