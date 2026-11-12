@@ -1,0 +1,24 @@
+name: Semgrep
+
+# This scan belongs to the feature branch, not to `main`: `main` stays upstream
+# plus the fork image workflow. It runs on pushes to this branch and on manual
+# dispatch, and registers the project on semgrep.dev (needs SEMGREP_APP_TOKEN).
+
+on:
+  push:
+    branches:
+    - feat/s3-region-scoped-state
+  workflow_dispatch: {}
+jobs:
+  semgrep:
+    name: semgrep/ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    container:
+      image: semgrep/semgrep
+    steps:
+    - uses: actions/checkout@v6
+    - run: semgrep ci
