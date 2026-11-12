@@ -1,0 +1,82 @@
+name: Fork image
+
+# Fork-only workflow: build the -full image that carries the S3
+# region-isolation patch and publish it to this fork's GHCR namespace, so
+# `MINISTACK_IMAGE` can point at a tag that actually exists.
+#
+# It lives on `main` on purpose. The feature branch stays a clean commit on top
+# of upstream, which is what gets sent upstream as a PR; the manual trigger
+# builds any ref, so a branch build does not need this file on that branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag to build
+        required: true
+        default: feat/s3-region-scoped-state
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The lab runs the full (Debian/glibc) variant, so that is all this
+      # builds. Suffix -full keeps the fork's tags a drop-in for the upstream
+      # naming: ghcr.io/<owner>/ministack:<version>-full.
+      #
+      # A branch tag moves; a release tag does not. Tag the commit to publish
+      # (`v1.5.39-fork.1` builds `1.5.39-fork.1-full`) and pin compose at that;
+      # `feat/...-full` stays for iteration and `sha-<short>-full` is the
+      # immutable per-commit tag.
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            suffix=-full
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=${{ inputs.ref }},enable=${{ inputs.ref != '' }}
+
+      - name: Build and push (full)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.full
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MINISTACK_VERSION=fork-${{ github.run_number }}
+          cache-from: type=gha,scope=fork-full
+          cache-to: type=gha,mode=max,scope=fork-full
