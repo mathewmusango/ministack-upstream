@@ -65,17 +65,21 @@ def test_s3_list_buckets_returns_arn_and_region(s3):
     assert len(b["BucketRegion"]) > 0
 
 
-def test_s3_create_bucket_already_exists(s3):
-    # MiniStack refuses a duplicate name outright (AWS answers 200 for a bucket
-    # you own in us-east-1): one code and one message, whichever owner asks.
-    s3.create_bucket(Bucket="intg-s3-dup")
-    with pytest.raises(ClientError) as exc:
-        s3.create_bucket(Bucket="intg-s3-dup")
-    err = exc.value.response["Error"]
-    assert err["Code"] == "BucketAlreadyExists"
-    assert err["Message"] == "Bucket intg-s3-dup already exists"
-    assert err["BucketName"] == "intg-s3-dup"
-    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
+def test_s3_create_bucket_owned_again_resets_the_acl(s3):
+    # AWS's legacy us-east-1 rule: a re-create by the owner answers 200 and resets
+    # the bucket's ACLs to private. A name owned by another account is
+    # BucketAlreadyExists anywhere, and any other region answers
+    # BucketAlreadyOwnedByYou.
+    bkt = f"intg-s3-dup-{_uuid_mod.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bkt, ObjectOwnership="ObjectWriter", ACL="public-read")
+    try:
+        grants = s3.get_bucket_acl(Bucket=bkt)["Grants"]
+        assert [g["Permission"] for g in grants] == ["FULL_CONTROL", "READ"]
+        s3.create_bucket(Bucket=bkt)          # 200, no exception
+        grants = s3.get_bucket_acl(Bucket=bkt)["Grants"]
+        assert [g["Permission"] for g in grants] == ["FULL_CONTROL"]
+    finally:
+        s3.delete_bucket(Bucket=bkt)
 
 def test_s3_delete_bucket(s3):
     s3.create_bucket(Bucket="intg-s3-delbkt")
@@ -893,7 +897,7 @@ def test_s3_location_constraint_required_outside_us_east_1(s3):
         resp = _create_bucket_error(euw1, Bucket=bkt)
         assert resp["Error"]["Code"] == "IllegalLocationConstraintException"
         resp = _create_bucket_error(euw1, Bucket=bkt, CreateBucketConfiguration={"LocationConstraint": "eu-west-1"})
-        assert resp["Error"]["Code"] == "BucketAlreadyExists"
+        assert resp["Error"]["Code"] == "BucketAlreadyOwnedByYou"
         assert resp["Error"]["BucketName"] == bkt
     finally:
         euw1.delete_bucket(Bucket=bkt)
@@ -9568,23 +9572,31 @@ def test_delete_objects_in_an_unversioned_bucket(s3, sqs, notified):
 def test_s3_create_owned_bucket_again(s3):
     east = f"owned-east-{_uuid_mod.uuid4().hex[:8]}"
     west = f"owned-west-{_uuid_mod.uuid4().hex[:8]}"
+    west_client = _regional_client("s3", "us-west-2")
     s3.create_bucket(Bucket=east, ObjectOwnership="ObjectWriter", ACL="public-read")
     s3.create_bucket(Bucket=west, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
     try:
-        # Same answer in us-east-1 and elsewhere: the duplicate is refused, and
-        # the existing bucket's ACLs are left alone.
-        for bucket, kwargs in ((east, {}), (west, {"CreateBucketConfiguration": {"LocationConstraint": "us-west-2"}})):
-            with pytest.raises(ClientError) as exc:
-                s3.create_bucket(Bucket=bucket, **kwargs)
-            assert exc.value.response["Error"]["Code"] == "BucketAlreadyExists"
-            assert exc.value.response["Error"]["BucketName"] == bucket
-            assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
-        # The refused create must not reset the ACL the bucket was made with.
+        # us-east-1 keeps AWS's legacy answer: 200, and the ACLs go back to private.
+        s3.create_bucket(Bucket=east)
         grants = s3.get_bucket_acl(Bucket=east)["Grants"]
-        assert [g["Permission"] for g in grants] == ["FULL_CONTROL", "READ"]
+        assert [g["Permission"] for g in grants] == ["FULL_CONTROL"]
+        # In the bucket's own region, the owner's re-create names the ownership.
+        with pytest.raises(ClientError) as exc:
+            west_client.create_bucket(Bucket=west, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
+        assert exc.value.response["Error"]["Code"] == "BucketAlreadyOwnedByYou"
+        assert exc.value.response["Error"]["BucketName"] == west
+        assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 409
+        # Refused, the bucket's own ACL is untouched.
+        grants = west_client.get_bucket_acl(Bucket=west)["Grants"]
+        assert [g["Permission"] for g in grants] == ["FULL_CONTROL"]
+        # Asked for from us-east-1, the same name in another region stays a
+        # duplicate of a bucket this account owns elsewhere.
+        with pytest.raises(ClientError) as exc:
+            s3.create_bucket(Bucket=west, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
+        assert exc.value.response["Error"]["Code"] == "BucketAlreadyExists"
     finally:
         s3.delete_bucket(Bucket=east)
-        s3.delete_bucket(Bucket=west)
+        west_client.delete_bucket(Bucket=west)
 
 
 # Under AUTH=true a request without credentials is anonymous. S3 answers it only

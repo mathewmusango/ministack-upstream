@@ -221,13 +221,13 @@ use1.list_tables()["TableNames"]   # → ["users"]
 euw1.list_tables()["TableNames"]   # → [] — eu-west-1 is independent
 ```
 
-**Region-isolated services:** as of 1.5.3, every regional service is region-isolated except S3 and Aurora DSQL (the isolation migrations rolled out service by service from 1.4.0 to 1.4.12 — see the CHANGELOG for the per-release history; services introduced later, like AWS Config and the Cloud Control API in 1.4.14, were born region-scoped).
+**Region-isolated services:** as of 1.5.3, every regional service is region-isolated except Aurora DSQL (the isolation migrations rolled out service by service from 1.4.0 to 1.4.12 — see the CHANGELOG for the per-release history; services introduced later, like AWS Config and the Cloud Control API in 1.4.14, were born region-scoped).
 
 Cross-resource references resolve in the referenced ARN's own account and region (SNS→SQS fanout, EventBridge targets, event source mappings), and cross-region references that real AWS rejects return the same errors AWS returns — e.g. invoking a `eu-west-1` Lambda from a `us-east-1` Step Functions task fails with `Functions from 'eu-west-1' are not reachable in this region`, exactly as on AWS.
 
-**Not yet region-isolated:** S3 and Aurora DSQL — these share state across regions within an account (as all services did before 1.4.0); use unique resource names there if your tests exercise two regions, until their isolation lands in a subsequent release. IAM/STS, CloudFront, Route 53, and Organizations are global services on AWS, so their account-scoped shared state is correct, not a gap.
+**Not yet region-isolated:** Aurora DSQL — it shares state across regions within an account (as all services did before 1.4.0); use unique resource names there if your tests exercise two regions. IAM/STS, CloudFront, Route 53, and Organizations are global services on AWS, so their account-scoped shared state is correct, not a gap.
 
-**Upgrading with `PERSIST_STATE=1`:** existing state files load and migrate automatically (on-disk format v2 with a version stamp — a newer-format file is refused instead of mis-parsed on downgrade). Each record's region is recovered from its stored ARNs; legacy records that carry no ARN migrate to the default region (`MINISTACK_REGION`).
+**Upgrading with `PERSIST_STATE=1`:** existing state files load and migrate automatically (per-service format versions with a version stamp — a newer-format file is refused instead of mis-parsed on downgrade). Each record's region is recovered from its stored ARNs; legacy records that carry no ARN migrate to the default region (`MINISTACK_REGION`). S3 now stamps format v3, and a v2 S3 snapshot migrates by the region each bucket already records.
 
 ---
 
