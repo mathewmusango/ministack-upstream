@@ -65,6 +65,26 @@ def test_s3_list_buckets_returns_arn_and_region(s3):
     assert len(b["BucketRegion"]) > 0
 
 
+def test_s3_list_buckets_is_account_global(s3):
+    """ListBuckets is account-global, the way AWS answers it: the console shows
+    one "All AWS Regions" table with an AWS Region column, and `aws s3 ls`
+    returns the same buckets with or without `--region`. A bucket homed in
+    another region therefore appears in this list, carrying its own region —
+    only mutations stay regional.
+    """
+    bkt = f"intg-s3-global-{_uuid_mod.uuid4().hex[:8]}"
+    s3.create_bucket(
+        Bucket=bkt, CreateBucketConfiguration={"LocationConstraint": "eu-west-1"}
+    )
+    try:
+        buckets = s3.list_buckets()["Buckets"]  # the default (us-east-1) endpoint
+        match = [b for b in buckets if b["Name"] == bkt]
+        assert len(match) == 1
+        assert match[0]["BucketRegion"] == "eu-west-1"
+    finally:
+        _regional_client("s3", "eu-west-1").delete_bucket(Bucket=bkt)
+
+
 def test_s3_create_bucket_owned_again_resets_the_acl(s3):
     # AWS's legacy us-east-1 rule: a re-create by the owner answers 200 and resets
     # the bucket's ACLs to private. A name owned by another account is
@@ -9791,11 +9811,11 @@ def test_s3_list_buckets_region_filter(s3):
                 break
         assert names == west
 
-        # No filter answers with the buckets homed in the caller's region:
-        # the name namespace is global, the listing is regional (S3 state is
-        # account+region scoped).
-        assert [b["Name"] for b in euw1.list_buckets(Prefix=prefix)["Buckets"]] == west
-        assert [b["Name"] for b in s3.list_buckets(Prefix=prefix)["Buckets"]] == east
+        # No filter is account-global, the way AWS answers ListBuckets: both
+        # endpoints return every bucket this account owns, whatever region
+        # homes it. Only the `BucketRegion` filter narrows the list.
+        assert [b["Name"] for b in euw1.list_buckets(Prefix=prefix)["Buckets"]] == sorted(east + west)
+        assert [b["Name"] for b in s3.list_buckets(Prefix=prefix)["Buckets"]] == sorted(east + west)
     finally:
         for name in east:
             s3.delete_bucket(Bucket=name)
@@ -9923,11 +9943,13 @@ def test_s3_wrong_region_at_home_endpoint_is_authorization_error(euw1_bucket):
 def test_s3_wrong_region_exemptions_and_match(euw1_bucket):
     status, _, body = _raw_signed("GET", f"/{euw1_bucket}?location", "us-east-1")
     assert status == 200 and b"eu-west-1" in body
-    # ListBuckets is exempt from the redirect, and it is regional: the signing
-    # region decides what is enumerated, so another region's bucket is absent
-    # and the bucket's own region lists it.
+    # ListBuckets is exempt from the redirect and account-global, the way AWS
+    # answers it: any region's endpoint enumerates every bucket the account owns,
+    # and each record carries the region that homes it. Only mutations stay
+    # regional.
     status, _, body = _raw_signed("GET", "/", "ap-south-1")
-    assert status == 200 and euw1_bucket.encode() not in body
+    assert status == 200 and euw1_bucket.encode() in body
+    assert b"<BucketRegion>eu-west-1</BucketRegion>" in body
     status, _, body = _raw_signed("GET", "/", "eu-west-1")
     assert status == 200 and euw1_bucket.encode() in body
     status, _, body = _raw_signed("GET", f"/{euw1_bucket}/k.txt", "eu-west-1")

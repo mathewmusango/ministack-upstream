@@ -104,9 +104,14 @@ class _BucketStore(AccountRegionScopedDict):
     within a partition" — so a name, not the request scope, identifies the
     record. Lookups therefore resolve to the region that owns the name (which is
     what lets the existing call sites, the wrong-endpoint ``301`` and the
-    ``BucketAlreadyExists`` check keep working), while *enumeration* —
-    iteration, ``len``, ``keys``/``items`` — stays scoped to the request region,
-    so ``ListBuckets`` answers with this region's buckets and no others.
+    ``BucketAlreadyExists`` check keep working), and *enumeration* — iteration,
+    ``len``, ``keys``/``items`` — stays scoped to the request region for every
+    caller that wants one region.
+
+    ``ListBuckets`` is the one exception, because AWS answers it account-globally:
+    the console's bucket list is an "All AWS Regions" table with an AWS Region
+    column, and ``aws s3 ls`` returns the same list with or without ``--region``.
+    ``names_across_regions`` exists for exactly that call.
 
     A write places the record in the region the record names: ``CreateBucket``
     with a ``LocationConstraint`` other than the signing region creates the
@@ -164,6 +169,18 @@ class _BucketStore(AccountRegionScopedDict):
             if scoped[-1] == key and scoped[0] == account_id:
                 return self._data[scoped]
         return None
+
+    def names_across_regions(self) -> list[str]:
+        """Every bucket name the caller's account owns, in any region.
+
+        ``ListBuckets`` is account-global in AWS (the console shows an "All AWS
+        Regions" table, and ``aws s3 ls`` answers the same with or without
+        ``--region``), so its enumeration cannot stay region-scoped. A name has
+        exactly one home region, so the result is already unique; the caller
+        sorts it.
+        """
+        account = get_account_id()
+        return [scoped[-1] for scoped in list(self._data) if scoped[0] == account]
 
     def pop(self, key, *args):
         try:
@@ -3252,7 +3269,7 @@ def _list_buckets(query_params=None, signed_region: str | None = None):
         )
 
     all_names = sorted(
-        n for n in _buckets
+        n for n in _buckets.names_across_regions()
         if n.startswith(prefix) and (not region_filter or bucket_region(n) == region_filter)
     )
     if continuation:
